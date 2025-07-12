@@ -1,8 +1,4 @@
-#Define una variable de tipo string llamada sentence. Utilizando un ciclo while, imprime la cantidad de caracteres que posee la variable hasta encontrar un punto (.).
-sentence = "Hola mundo. Curso de Python."
-count = 0
-while count < len(sentence):
-    if sentence[count] == ".":
-        break
-    count += 1
-print(count)
+#Utilizando el diccionario del paso anterior (my_dictionary): Genera un nuevo string con las llaves del diccionario. Las llaves debe encontrarse separadas por un guión (-). Imprime dicho string en consola.
+my_dictionary = {'name': 'Cody', 'age': 12, 'course': 'python'}
+keys_string = '-'.join(my_dictionary.keys())
+print(keys_string)
