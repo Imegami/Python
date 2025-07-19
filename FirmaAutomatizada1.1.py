@@ -44,7 +44,7 @@ NOTAS ADICIONALES
 - El sistema solicitará confirmación antes de modificar y exportar documentos.
 - Toda la configuración puede personalizarse desde un archivo config.json o mediante la interfaz gráfica (si está habilitada).
 
-IMPORTANTE
+AVISO LEGAL
 -------------------------------------------------------
 Este sistema está diseñado exclusivamente para fines educativos, técnicos, de prueba o generación de documentación simulada. 
 No debe utilizarse con documentos reales ni con fines de suplantación de identidad. Las firmas generadas no tienen validez legal.
