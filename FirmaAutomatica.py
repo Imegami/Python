@@ -6,14 +6,13 @@ Simulador de Firma Automática de Documentos
 Aplicación para insertar firmas manuscritas simuladas, nombres y DNI
 en documentos PDF, DOCX y RTF usando datos de Excel.
 
-Características mejoradas:
-- Interfaz gráfica intuitiva
-- Validación robusta de datos
-- Soporte múltiples formatos
-- Generación automática de firmas
-- Configuración personalizable
-- Procesamiento por lotes
-- Sistema de logging completo
+Requeriments
+pandas
+pymupdf
+python-docx
+pillow
+
+pip install pandas pymupdf python-docx pillow
 """
 
 import os
