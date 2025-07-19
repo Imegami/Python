@@ -49,6 +49,7 @@ AVISO LEGAL
 Este sistema está diseñado exclusivamente para fines educativos, técnicos, de prueba o generación de documentación simulada. 
 No debe utilizarse con documentos reales ni con fines de suplantación de identidad. Las firmas generadas no tienen validez legal.
 """
+"""
 # Dependencias para Sistema de Inserción Automatizada de Firmas
 # Instalar con: pip install -r requirements.txt
 
@@ -90,6 +91,7 @@ logging  # Incluido en Python estándar
 Aplicación para Inserción Automatizada de Firmas en Documentos
 Autor: Imegami
 Versión: 1.1
+"""
 """
 
 import os
