@@ -1,173 +1,556 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Sistema Automático de Firma de Documentos
-=========================================
-
-Aplicación para insertar firmas automáticamente en documentos usando datos de Excel.
-Soporta PDF, DOCX, RTF y otros formatos.
-
+Aplicación para Inserción Automatizada de Firmas en Documentos
 Autor: Imegami
 Versión: 1.1
-Fecha: 2025
 """
 
 import os
 import sys
-import logging
 import pandas as pd
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, scrolledtext
+from tkinter import filedialog, messagebox, ttk
 from pathlib import Path
-import fitz  # PyMuPDF
-from docx import Document
-from docx.shared import Inches, Pt
-from docx.enum.text import WD_ALIGN_PARAGRAPH
-from PIL import Image, ImageDraw, ImageFont
-import zipfile
-from datetime import datetime
 import json
-from typing import List, Dict, Optional, Tuple
+from datetime import datetime
 import re
+from PIL import Image, ImageDraw, ImageFont
+import io
+import logging
 
+# Importaciones para manejo de documentos
+try:
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.pagesizes import letter
+    from PyPDF2 import PdfReader, PdfWriter
+    PDF_AVAILABLE = True
+except ImportError:
+    PDF_AVAILABLE = False
 
-class DocumentSigner:
-    """Clase principal para el sistema de firma de documentos."""
+try:
+    from docx import Document
+    from docx.shared import Inches
+    DOCX_AVAILABLE = True
+except ImportError:
+    DOCX_AVAILABLE = False
+
+# Configuración de logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('signature_app.log'),
+        logging.StreamHandler()
+    ]
+)
+
+class ConfigurationManager:
+    """Gestor de configuración de la aplicación"""
     
     def __init__(self):
-        self.logger = self._setup_logger()
-        self.config = self._load_config()
-        self.excel_data = None
-        self.signature_images = {}
-        self.processed_documents = []
-        
-    def _setup_logger(self) -> logging.Logger:
-        """Configura el sistema de logging."""
-        logger = logging.getLogger('DocumentSigner')
-        logger.setLevel(logging.INFO)
-        
-        # Handler para archivo
-        file_handler = logging.FileHandler('document_signer.log', encoding='utf-8')
-        file_handler.setLevel(logging.INFO)
-        
-        # Handler para consola
-        console_handler = logging.StreamHandler()
-        console_handler.setLevel(logging.INFO)
-        
-        # Formato
-        formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        )
-        file_handler.setFormatter(formatter)
-        console_handler.setFormatter(formatter)
-        
-        logger.addHandler(file_handler)
-        logger.addHandler(console_handler)
-        
-        return logger
-    
-    def _load_config(self) -> dict:
-        """Carga configuración por defecto."""
-        return {
-            'output_folder': str(Path.home() / 'Documentos' / 'Documentos_Firmados'),
-            'signature_size': (150, 60),
-            'font_size': 12,
-            'font_color': 'black',
-            'signature_quality': 95,
-            'backup_originals': True,
-            'placeholders': {
-                'firma': ['<<firma>>', '<<signature>>', '[FIRMA]', '[SIGNATURE]'],
-                'nombre': ['<<nombre>>', '<<name>>', '[NOMBRE]', '[NAME]'],
-                'dni': ['<<dni>>', '<<nif>>', '[DNI]', '[NIF]']
-            },
-            'common_paths': {
-                'excel': [
-                    str(Path.home() / 'Escritorio'),
-                    str(Path.home() / 'Documentos'),
-                    str(Path.home() / 'Descargas')
-                ],
-                'documents': [
-                    str(Path.home() / 'Escritorio'),
-                    str(Path.home() / 'Documentos'),
-                    str(Path.home() / 'Descargas')
-                ]
-            }
+        self.config_file = "config.json"
+        self.default_config = {
+            "output_path": "",
+            "signature_scale_min": 0.5,
+            "signature_scale_max": 2.0,
+            "default_font": "Arial",
+            "text_color": "#000000",
+            "text_size": 12,
+            "signature_opacity": 0.8,
+            "margin_top": 10,
+            "margin_bottom": 10
         }
+        self.load_config()
     
-    def validate_excel_file(self, file_path: str) -> Tuple[bool, str]:
-        """Valida el archivo Excel y sus columnas requeridas."""
+    def load_config(self):
+        """Carga la configuración desde archivo"""
         try:
-            df = pd.read_excel(file_path)
-            
-            # Columnas requeridas
-            required_cols = ['nombre', 'dni']
-            optional_cols = ['apellido1', 'apellido2', 'firma_imagen']
-            
-            # Verificar columnas requeridas
-            missing_cols = [col for col in required_cols if col not in df.columns]
-            if missing_cols:
-                return False, f"Faltan columnas requeridas: {', '.join(missing_cols)}"
-            
-            # Verificar datos vacíos
-            empty_rows = df[df[required_cols].isnull().any(axis=1)]
-            if not empty_rows.empty:
-                return False, f"Hay {len(empty_rows)} filas con datos faltantes en columnas requeridas"
-            
-            self.logger.info(f"Excel validado correctamente: {len(df)} registros encontrados")
-            return True, f"Archivo válido con {len(df)} registros"
-            
+            if os.path.exists(self.config_file):
+                with open(self.config_file, 'r', encoding='utf-8') as f:
+                    self.config = json.load(f)
+            else:
+                self.config = self.default_config.copy()
         except Exception as e:
-            return False, f"Error al leer Excel: {str(e)}"
+            logging.error(f"Error cargando configuración: {e}")
+            self.config = self.default_config.copy()
     
-    def load_excel_data(self, file_path: str) -> bool:
-        """Carga los datos del archivo Excel."""
-        try:
-            self.excel_data = pd.read_excel(file_path)
-            
-            # Crear columna nombre_completo si no existe
-            if 'nombre_completo' not in self.excel_data.columns:
-                cols = ['nombre']
-                if 'apellido1' in self.excel_data.columns:
-                    cols.append('apellido1')
-                if 'apellido2' in self.excel_data.columns:
-                    cols.append('apellido2')
+    def save_configuration(self):
+        """Guarda la configuración actual"""
+        self.config.set('output_path', self.output_path_var.get())
+        self.config.set('text_size', self.text_size_var.get())
+        self.config.set('signature_opacity', self.opacity_var.get())
+        self.config.save_config()
+        messagebox.showinfo("Configuración", "Configuración guardada correctamente")
+    
+    def process_documents(self):
+        """Procesa todos los documentos con los datos cargados"""
+        # Validar que tenemos datos y documentos
+        if self.excel_data is None or self.excel_data.empty:
+            messagebox.showerror("Error", "No hay datos Excel válidos cargados")
+            return
+        
+        if not self.selected_documents:
+            messagebox.showerror("Error", "No hay documentos seleccionados")
+            return
+        
+        # Generar resumen
+        self._update_processing_summary()
+        
+        # Confirmar procesamiento
+        if not messagebox.askyesno("Confirmación", 
+                                  "¿Proceder con el procesamiento de documentos?"):
+            return
+        
+        # Determinar ruta de salida
+        output_path = self.output_path_var.get()
+        if not output_path:
+            output_path = self._get_default_output_path()
+        
+        # Crear carpeta de salida si no existe
+        os.makedirs(output_path, exist_ok=True)
+        
+        # Procesar documentos
+        self.processing_log = []
+        total_operations = len(self.selected_documents) * len(self.excel_data)
+        current_operation = 0
+        
+        for doc_path in self.selected_documents:
+            for _, person in self.excel_data.iterrows():
+                current_operation += 1
+                self._log_message(f"Procesando ({current_operation}/{total_operations}): "
+                                f"{os.path.basename(doc_path)} - {person['nombre_completo']}")
                 
-                self.excel_data['nombre_completo'] = self.excel_data[cols].apply(
-                    lambda x: ' '.join(x.dropna().astype(str)), axis=1
+                # Procesar documento
+                result_path = self.doc_processor.process_document(
+                    doc_path, person.to_dict(), output_path
                 )
+                
+                if result_path:
+                    log_entry = {
+                        'documento_original': os.path.basename(doc_path),
+                        'firmante': person['nombre_completo'],
+                        'dni': person['dni'],
+                        'fecha_hora': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        'archivo_salida': os.path.basename(result_path),
+                        'ruta_completa': str(result_path),
+                        'tipo_firma': 'generada' if 'firma' not in person or pd.isna(person['firma']) else 'imagen'
+                    }
+                    self.processing_log.append(log_entry)
+                    self._log_message(f"✅ Completado: {os.path.basename(result_path)}")
+                else:
+                    self._log_message(f"❌ Error procesando: {os.path.basename(doc_path)} - {person['nombre_completo']}")
+        
+        # Generar log Excel
+        self._generate_excel_log(output_path)
+        
+        # Mostrar resumen final
+        successful = len(self.processing_log)
+        self._log_message(f"\n🎉 PROCESAMIENTO COMPLETADO")
+        self._log_message(f"Total operaciones exitosas: {successful}")
+        self._log_message(f"Documentos generados en: {output_path}")
+        
+        messagebox.showinfo("Completado", 
+                          f"Procesamiento completado.\n"
+                          f"Documentos generados: {successful}\n"
+                          f"Ruta: {output_path}")
+    
+    def _update_processing_summary(self):
+        """Actualiza el resumen de procesamiento"""
+        self.summary_text.delete(1.0, tk.END)
+        
+        if self.excel_data is not None and not self.selected_documents:
+            summary = f"📊 RESUMEN DE PROCESAMIENTO\n\n"
+            summary += f"Personas a firmar: {len(self.excel_data)}\n"
+            summary += f"Documentos seleccionados: {len(self.selected_documents)}\n"
+            summary += f"Total operaciones: {len(self.excel_data) * len(self.selected_documents)}\n\n"
             
-            self.logger.info(f"Datos Excel cargados: {len(self.excel_data)} registros")
-            return True
+            summary += "PERSONAS:\n"
+            for _, person in self.excel_data.head(5).iterrows():
+                summary += f"• {person['nombre_completo']} - {person['dni']}\n"
             
+            if len(self.excel_data) > 5:
+                summary += f"... y {len(self.excel_data) - 5} más\n"
+            
+            summary += "\nDOCUMENTOS:\n"
+            for doc in self.selected_documents[:5]:
+                summary += f"• {os.path.basename(doc)}\n"
+            
+            if len(self.selected_documents) > 5:
+                summary += f"... y {len(self.selected_documents) - 5} más\n"
+            
+            output_path = self.output_path_var.get() or self._get_default_output_path()
+            summary += f"\nRUTA DE SALIDA: {output_path}\n"
+        else:
+            summary = "⚠️ Faltan datos o documentos para procesar"
+        
+        self.summary_text.insert(tk.END, summary)
+    
+    def _get_default_output_path(self):
+        """Obtiene ruta de salida por defecto"""
+        default_paths = [
+            Path.home() / "Desktop" / "Documentos_Firmados",
+            Path.home() / "Documents" / "Documentos_Firmados",
+            Path.home() / "Downloads" / "Documentos_Firmados"
+        ]
+        
+        for path in default_paths:
+            if path.parent.exists():
+                return str(path)
+        
+        return str(Path.cwd() / "Documentos_Firmados")
+    
+    def _log_message(self, message):
+        """Registra mensaje en el log"""
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        log_entry = f"[{timestamp}] {message}\n"
+        self.log_text.insert(tk.END, log_entry)
+        self.log_text.see(tk.END)
+        self.root.update_idletasks()
+        logging.info(message)
+    
+    def _generate_excel_log(self, output_path):
+        """Genera log de actividad en Excel"""
+        if not self.processing_log:
+            return
+        
+        try:
+            log_df = pd.DataFrame(self.processing_log)
+            log_file = os.path.join(output_path, "log_firmado.xlsx")
+            log_df.to_excel(log_file, index=False)
+            self._log_message(f"📋 Log generado: {log_file}")
         except Exception as e:
-            self.logger.error(f"Error cargando Excel: {e}")
+            self._log_message(f"❌ Error generando log: {e}")
+    
+    def _show_excel_selection_dialog(self, excel_files):
+        """Muestra diálogo de selección de archivos Excel"""
+        selection_window = tk.Toplevel(self.root)
+        selection_window.title("Seleccionar archivo Excel")
+        selection_window.geometry("500x300")
+        selection_window.transient(self.root)
+        selection_window.grab_set()
+        
+        ttk.Label(selection_window, text="Archivos Excel encontrados:").pack(pady=10)
+        
+        listbox = tk.Listbox(selection_window)
+        listbox.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        for file_path in excel_files:
+            listbox.insert(tk.END, f"{file_path.name} ({file_path.parent})")
+        
+        def on_select():
+            selection = listbox.curselection()
+            if selection:
+                selected_file = excel_files[selection[0]]
+                selection_window.destroy()
+                self._process_excel_file(selected_file)
+        
+        ttk.Button(selection_window, text="Seleccionar", 
+                  command=on_select).pack(pady=10)
+    
+    def run(self):
+        """Ejecuta la aplicación"""
+        self.root.mainloop()
+
+class ConsoleInterface:
+    """Interfaz de línea de comandos"""
+    
+    def __init__(self):
+        self.config = ConfigurationManager()
+        self.excel_processor = ExcelDataProcessor()
+        self.doc_processor = DocumentProcessor(self.config)
+    
+    def run(self, args):
+        """Ejecuta la interfaz de consola"""
+        if len(args) < 3:
+            self.show_help()
+            return
+        
+        excel_file = args[1]
+        documents = args[2:]
+        
+        # Cargar datos Excel
+        print("Cargando datos Excel...")
+        if not self.excel_processor.load_excel_file(excel_file):
+            print("❌ Error cargando archivo Excel:")
+            for error in self.excel_processor.validation_errors:
+                print(f"  • {error}")
+            return
+        
+        excel_data = self.excel_processor.get_valid_data()
+        print(f"✅ {len(excel_data)} registros válidos cargados")
+        
+        # Configurar ruta de salida
+        output_path = Path.cwd() / "Documentos_Firmados"
+        output_path.mkdir(exist_ok=True)
+        
+        # Procesar documentos
+        print(f"Procesando {len(documents)} documentos...")
+        processing_log = []
+        
+        for doc_path in documents:
+            if not os.path.exists(doc_path):
+                print(f"❌ Documento no encontrado: {doc_path}")
+                continue
+            
+            print(f"📄 Procesando: {os.path.basename(doc_path)}")
+            
+            for _, person in excel_data.iterrows():
+                result_path = self.doc_processor.process_document(
+                    doc_path, person.to_dict(), output_path
+                )
+                
+                if result_path:
+                    log_entry = {
+                        'documento_original': os.path.basename(doc_path),
+                        'firmante': person['nombre_completo'],
+                        'dni': person['dni'],
+                        'fecha_hora': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        'archivo_salida': os.path.basename(result_path),
+                        'tipo_firma': 'generada'
+                    }
+                    processing_log.append(log_entry)
+                    print(f"  ✅ {person['nombre_completo']} - {os.path.basename(result_path)}")
+                else:
+                    print(f"  ❌ Error con {person['nombre_completo']}")
+        
+        # Generar log
+        if processing_log:
+            log_df = pd.DataFrame(processing_log)
+            log_file = output_path / "log_firmado.xlsx"
+            log_df.to_excel(log_file, index=False)
+            print(f"📋 Log generado: {log_file}")
+        
+        print(f"\n🎉 Procesamiento completado")
+        print(f"Documentos generados en: {output_path}")
+        print(f"Total operaciones exitosas: {len(processing_log)}")
+    
+    def show_help(self):
+        """Muestra ayuda de la interfaz de consola"""
+        help_text = """
+Sistema de Inserción Automatizada de Firmas - Modo Consola
+
+Uso: python signature_app.py <archivo_excel> <documento1> [documento2] ...
+
+Ejemplos:
+  python signature_app.py datos.xlsx documento.pdf
+  python signature_app.py empleados.xlsx contrato.docx acuerdo.pdf
+
+Formatos soportados:
+  • Excel: .xlsx, .xls
+  • Documentos: .pdf, .docx, .rtf
+
+El archivo Excel debe contener las columnas:
+  • dni (requerido)
+  • nombre_completo o (nombre, apellido1, apellido2)
+  • firma (opcional - ruta a imagen de firma)
+"""
+        print(help_text)
+
+def main():
+    """Función principal"""
+    # Verificar dependencias
+    missing_deps = []
+    if not PDF_AVAILABLE:
+        missing_deps.append("PyPDF2, reportlab (para PDF)")
+    if not DOCX_AVAILABLE:
+        missing_deps.append("python-docx (para DOCX)")
+    
+    if missing_deps:
+        print("⚠️  Dependencias faltantes:")
+        for dep in missing_deps:
+            print(f"  • {dep}")
+        print("\nInstalar con: pip install PyPDF2 reportlab python-docx")
+        print("Continuando con funcionalidades limitadas...\n")
+    
+    # Determinar modo de ejecución
+    if len(sys.argv) > 1:
+        # Modo consola
+        console = ConsoleInterface()
+        console.run(sys.argv)
+    else:
+        # Modo gráfico
+        try:
+            app = SignatureApp()
+            app.run()
+        except Exception as e:
+            print(f"Error iniciando interfaz gráfica: {e}")
+            print("Usa: python signature_app.py <archivo_excel> <documentos...>")
+
+if __name__ == "__main__":
+    main()config(self):
+        """Guarda la configuración actual"""
+        try:
+            with open(self.config_file, 'w', encoding='utf-8') as f:
+                json.dump(self.config, f, indent=4, ensure_ascii=False)
+        except Exception as e:
+            logging.error(f"Error guardando configuración: {e}")
+    
+    def get(self, key):
+        return self.config.get(key, self.default_config.get(key))
+    
+    def set(self, key, value):
+        self.config[key] = value
+
+class ExcelDataProcessor:
+    """Procesador de datos desde Excel"""
+    
+    def __init__(self):
+        self.data = None
+        self.validation_errors = []
+    
+    def find_excel_files(self):
+        """Busca archivos Excel en rutas comunes"""
+        common_paths = [
+            Path.home() / "Desktop",
+            Path.home() / "Downloads", 
+            Path.home() / "Documents",
+            Path.cwd()
+        ]
+        
+        excel_files = []
+        for path in common_paths:
+            if path.exists():
+                excel_files.extend(path.glob("*.xlsx"))
+                excel_files.extend(path.glob("*.xls"))
+        
+        return excel_files
+    
+    def load_excel_file(self, file_path):
+        """Carga y valida archivo Excel"""
+        try:
+            self.data = pd.read_excel(file_path)
+            self.validation_errors = []
+            return self.validate_data()
+        except Exception as e:
+            self.validation_errors.append(f"Error cargando archivo: {e}")
             return False
     
-    def generate_signature_image(self, name: str) -> str:
-        """Genera una imagen de firma manuscrita para un nombre dado."""
+    def validate_data(self):
+        """Valida la estructura y contenido de los datos"""
+        if self.data is None or self.data.empty:
+            self.validation_errors.append("Archivo Excel vacío")
+            return False
+        
+        # Verificar columnas requeridas
+        required_columns = ['dni']
+        optional_columns = ['nombre', 'apellido1', 'apellido2', 'nombre_completo', 'firma']
+        
+        missing_required = [col for col in required_columns if col not in self.data.columns]
+        if missing_required:
+            self.validation_errors.append(f"Columnas requeridas faltantes: {missing_required}")
+        
+        # Verificar que existe al menos una forma de obtener el nombre completo
+        name_columns = [col for col in ['nombre_completo', 'nombre'] if col in self.data.columns]
+        if not name_columns:
+            self.validation_errors.append("Debe existir columna 'nombre_completo' o 'nombre'")
+        
+        # Crear nombre completo si no existe
+        if 'nombre_completo' not in self.data.columns:
+            name_parts = []
+            if 'nombre' in self.data.columns:
+                name_parts.append(self.data['nombre'].fillna(''))
+            if 'apellido1' in self.data.columns:
+                name_parts.append(self.data['apellido1'].fillna(''))
+            if 'apellido2' in self.data.columns:
+                name_parts.append(self.data['apellido2'].fillna(''))
+            
+            if name_parts:
+                self.data['nombre_completo'] = name_parts[0]
+                for part in name_parts[1:]:
+                    self.data['nombre_completo'] += ' ' + part
+                self.data['nombre_completo'] = self.data['nombre_completo'].str.strip()
+        
+        # Validar DNI
+        self.data['dni'] = self.data['dni'].astype(str).str.strip()
+        invalid_dni = self.data[self.data['dni'].isin(['', 'nan', 'None'])].index.tolist()
+        if invalid_dni:
+            self.validation_errors.append(f"DNI vacío en filas: {invalid_dni}")
+        
+        # Validar nombres
+        invalid_names = self.data[self.data['nombre_completo'].isin(['', 'nan', 'None'])].index.tolist()
+        if invalid_names:
+            self.validation_errors.append(f"Nombre vacío en filas: {invalid_names}")
+        
+        # Verificar duplicados
+        duplicated_dni = self.data[self.data.duplicated(subset=['dni'])]['dni'].tolist()
+        if duplicated_dni:
+            self.validation_errors.append(f"DNI duplicados: {duplicated_dni}")
+        
+        return len(self.validation_errors) == 0
+    
+    def get_validation_report(self):
+        """Genera reporte de validación"""
+        report = {
+            'total_records': len(self.data) if self.data is not None else 0,
+            'valid_records': 0,
+            'errors': self.validation_errors,
+            'preview': None
+        }
+        
+        if self.data is not None and not self.data.empty:
+            valid_mask = (~self.data['dni'].isin(['', 'nan', 'None'])) & \
+                        (~self.data['nombre_completo'].isin(['', 'nan', 'None']))
+            report['valid_records'] = valid_mask.sum()
+            report['preview'] = self.data.head().to_dict('records')
+        
+        return report
+    
+    def get_valid_data(self):
+        """Retorna solo los datos válidos"""
+        if self.data is None:
+            return pd.DataFrame()
+        
+        valid_mask = (~self.data['dni'].isin(['', 'nan', 'None'])) & \
+                    (~self.data['nombre_completo'].isin(['', 'nan', 'None']))
+        return self.data[valid_mask].copy()
+
+class SignatureGenerator:
+    """Generador de firmas manuscritas simuladas"""
+    
+    def __init__(self, config_manager):
+        self.config = config_manager
+        self.signature_fonts = self._find_signature_fonts()
+    
+    def _find_signature_fonts(self):
+        """Busca fuentes tipo firma disponibles"""
+        font_paths = [
+            "fonts/",
+            "assets/fonts/",
+            "/System/Library/Fonts/",
+            "C:/Windows/Fonts/"
+        ]
+        
+        signature_fonts = []
+        signature_keywords = ['script', 'handwriting', 'signature', 'cursive']
+        
+        for path in font_paths:
+            if os.path.exists(path):
+                for file in os.listdir(path):
+                    if file.lower().endswith(('.ttf', '.otf')):
+                        if any(keyword in file.lower() for keyword in signature_keywords):
+                            signature_fonts.append(os.path.join(path, file))
+        
+        return signature_fonts
+    
+    def generate_signature_image(self, name, width=300, height=100):
+        """Genera una imagen de firma simulada"""
         try:
-            # Crear imagen
-            img_width, img_height = self.config['signature_size']
-            img = Image.new('RGBA', (img_width, img_height), (255, 255, 255, 0))
+            # Crear imagen en blanco
+            img = Image.new('RGBA', (width, height), (255, 255, 255, 0))
             draw = ImageDraw.Draw(img)
             
-            # Intentar cargar fuente manuscrita
-            font_paths = [
-                'fonts/signature_font.ttf',
-                'C:/Windows/Fonts/segoeui.ttf',  # Windows
-                '/System/Library/Fonts/Helvetica.ttc',  # macOS
-                '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'  # Linux
-            ]
+            # Seleccionar fuente
+            font_path = None
+            if self.signature_fonts:
+                font_path = self.signature_fonts[0]
             
-            font = None
-            for font_path in font_paths:
-                try:
-                    font = ImageFont.truetype(font_path, 24)
-                    break
-                except:
-                    continue
-            
-            if font is None:
+            try:
+                if font_path and os.path.exists(font_path):
+                    font = ImageFont.truetype(font_path, size=40)
+                else:
+                    font = ImageFont.load_default()
+            except:
                 font = ImageFont.load_default()
             
             # Calcular posición centrada
@@ -175,764 +558,443 @@ class DocumentSigner:
             text_width = bbox[2] - bbox[0]
             text_height = bbox[3] - bbox[1]
             
-            x = (img_width - text_width) // 2
-            y = (img_height - text_height) // 2
+            x = (width - text_width) // 2
+            y = (height - text_height) // 2
             
-            # Dibujar texto con efecto manuscrito
-            draw.text((x, y), name, fill='black', font=font)
+            # Dibujar firma con efecto manuscrito
+            color = (0, 0, 139, int(255 * self.config.get('signature_opacity')))  # Azul oscuro
+            draw.text((x, y), name, font=font, fill=color)
             
-            # Guardar imagen temporal
-            temp_path = f"temp_signature_{name.replace(' ', '_')}.png"
-            img.save(temp_path, 'PNG', quality=self.config['signature_quality'])
+            # Guardar en bytes
+            img_bytes = io.BytesIO()
+            img.save(img_bytes, format='PNG')
+            img_bytes.seek(0)
             
-            self.logger.info(f"Firma generada para: {name}")
-            return temp_path
+            return img_bytes
             
         except Exception as e:
-            self.logger.error(f"Error generando firma para {name}: {e}")
+            logging.error(f"Error generando firma para {name}: {e}")
             return None
     
-    def sign_pdf(self, pdf_path: str, person_data: dict, output_path: str) -> bool:
-        """Firma un documento PDF."""
+    def load_signature_image(self, signature_path):
+        """Carga imagen de firma desde archivo"""
         try:
-            doc = fitz.open(pdf_path)
-            
-            # Obtener o generar imagen de firma
-            signature_path = None
-            if 'firma_imagen' in person_data and pd.notna(person_data['firma_imagen']):
-                signature_path = person_data['firma_imagen']
-            else:
-                signature_path = self.generate_signature_image(person_data['nombre_completo'])
-            
-            if not signature_path or not os.path.exists(signature_path):
-                self.logger.warning(f"No se pudo obtener firma para {person_data['nombre_completo']}")
-                return False
-            
-            # Procesar cada página
-            for page_num in range(len(doc)):
-                page = doc[page_num]
-                
-                # Buscar placeholders
-                text_instances = page.search_for("<<firma>>")
-                name_instances = page.search_for("<<nombre>>")
-                dni_instances = page.search_for("<<dni>>")
-                
-                # Insertar firma
-                if text_instances:
-                    for inst in text_instances:
-                        # Insertar imagen de firma
-                        img_rect = fitz.Rect(inst.x0, inst.y0, inst.x0 + 150, inst.y0 + 60)
-                        page.insert_image(img_rect, filename=signature_path)
-                        
-                        # Eliminar placeholder
-                        page.add_redact_annot(inst)
-                else:
-                    # Insertar al final si no hay placeholder
-                    rect = page.rect
-                    img_rect = fitz.Rect(rect.width - 200, rect.height - 100, 
-                                       rect.width - 50, rect.height - 40)
-                    page.insert_image(img_rect, filename=signature_path)
-                
-                # Insertar nombre
-                if name_instances:
-                    for inst in name_instances:
-                        page.insert_text(
-                            (inst.x0, inst.y0 + 15), 
-                            person_data['nombre_completo'],
-                            fontsize=self.config['font_size'],
-                            color=(0, 0, 0)
-                        )
-                        page.add_redact_annot(inst)
-                
-                # Insertar DNI
-                if dni_instances:
-                    for inst in dni_instances:
-                        page.insert_text(
-                            (inst.x0, inst.y0 + 15), 
-                            str(person_data['dni']),
-                            fontsize=self.config['font_size'],
-                            color=(0, 0, 0)
-                        )
-                        page.add_redact_annot(inst)
-                
-                # Aplicar redacciones
-                page.apply_redactions()
-            
-            # Guardar documento firmado
-            doc.save(output_path)
-            doc.close()
-            
-            # Limpiar archivo temporal de firma
-            if signature_path.startswith("temp_signature_"):
-                try:
-                    os.remove(signature_path)
-                except:
-                    pass
-            
-            self.logger.info(f"PDF firmado exitosamente: {output_path}")
-            return True
-            
+            if os.path.exists(signature_path):
+                with open(signature_path, 'rb') as f:
+                    return io.BytesIO(f.read())
+            return None
         except Exception as e:
-            self.logger.error(f"Error firmando PDF {pdf_path}: {e}")
+            logging.error(f"Error cargando firma {signature_path}: {e}")
+            return None
+
+class DocumentProcessor:
+    """Procesador de documentos para inserción de firmas"""
+    
+    def __init__(self, config_manager):
+        self.config = config_manager
+        self.signature_gen = SignatureGenerator(config_manager)
+    
+    def find_documents(self):
+        """Busca documentos en rutas comunes"""
+        common_paths = [
+            Path.home() / "Desktop",
+            Path.home() / "Downloads",
+            Path.home() / "Documents",
+            Path.cwd()
+        ]
+        
+        documents = []
+        supported_extensions = ['.pdf', '.docx', '.rtf']
+        
+        for path in common_paths:
+            if path.exists():
+                for ext in supported_extensions:
+                    documents.extend(path.glob(f"*{ext}"))
+        
+        return documents
+    
+    def detect_placeholders(self, text):
+        """Detecta marcadores de posición en el texto"""
+        placeholders = {
+            'firma': re.findall(r'<<firma>>', text, re.IGNORECASE),
+            'nombre': re.findall(r'<<nombre>>', text, re.IGNORECASE),
+            'dni': re.findall(r'<<dni>>', text, re.IGNORECASE),
+            'nombre_completo': re.findall(r'<<nombre_completo>>', text, re.IGNORECASE)
+        }
+        return placeholders
+    
+    def process_pdf_document(self, doc_path, person_data, output_path):
+        """Procesa documento PDF"""
+        if not PDF_AVAILABLE:
+            logging.error("PyPDF2 y reportlab no están disponibles")
+            return False
+        
+        try:
+            # Leer PDF original
+            with open(doc_path, 'rb') as file:
+                reader = PdfReader(file)
+                writer = PdfWriter()
+                
+                # Procesar cada página
+                for page_num, page in enumerate(reader.pages):
+                    # Extraer texto para buscar placeholders
+                    text = page.extract_text()
+                    placeholders = self.detect_placeholders(text)
+                    
+                    # Si hay placeholders o es la última página, agregar firma
+                    if any(placeholders.values()) or page_num == len(reader.pages) - 1:
+                        # Crear overlay con firma y datos
+                        overlay_buffer = self._create_pdf_overlay(person_data)
+                        if overlay_buffer:
+                            overlay_reader = PdfReader(overlay_buffer)
+                            overlay_page = overlay_reader.pages[0]
+                            page.merge_page(overlay_page)
+                    
+                    writer.add_page(page)
+                
+                # Guardar documento firmado
+                with open(output_path, 'wb') as output_file:
+                    writer.write(output_file)
+                
+                return True
+                
+        except Exception as e:
+            logging.error(f"Error procesando PDF {doc_path}: {e}")
             return False
     
-    def sign_docx(self, docx_path: str, person_data: dict, output_path: str) -> bool:
-        """Firma un documento DOCX."""
+    def _create_pdf_overlay(self, person_data):
+        """Crea overlay PDF con firma y datos"""
         try:
-            doc = Document(docx_path)
+            buffer = io.BytesIO()
+            c = canvas.Canvas(buffer, pagesize=letter)
             
-            # Generar o obtener imagen de firma
-            signature_path = None
-            if 'firma_imagen' in person_data and pd.notna(person_data['firma_imagen']):
-                signature_path = person_data['firma_imagen']
+            # Posiciones para inserción (ajustables)
+            signature_x, signature_y = 100, 100
+            text_x, text_y = 100, 70
+            
+            # Insertar firma
+            if 'firma' in person_data and person_data['firma']:
+                signature_img = self.signature_gen.load_signature_image(person_data['firma'])
             else:
-                signature_path = self.generate_signature_image(person_data['nombre_completo'])
+                signature_img = self.signature_gen.generate_signature_image(person_data['nombre_completo'])
             
-            if not signature_path or not os.path.exists(signature_path):
-                self.logger.warning(f"No se pudo obtener firma para {person_data['nombre_completo']}")
-                return False
+            if signature_img:
+                c.drawImage(signature_img, signature_x, signature_y, width=200, height=50)
             
-            # Buscar y reemplazar placeholders en párrafos
-            placeholder_found = False
+            # Insertar texto
+            c.setFont("Helvetica", self.config.get('text_size'))
+            c.drawString(text_x, text_y, f"Nombre: {person_data['nombre_completo']}")
+            c.drawString(text_x, text_y - 20, f"DNI: {person_data['dni']}")
             
+            c.save()
+            buffer.seek(0)
+            return buffer
+            
+        except Exception as e:
+            logging.error(f"Error creando overlay PDF: {e}")
+            return None
+    
+    def process_docx_document(self, doc_path, person_data, output_path):
+        """Procesa documento DOCX"""
+        if not DOCX_AVAILABLE:
+            logging.error("python-docx no está disponible")
+            return False
+        
+        try:
+            doc = Document(doc_path)
+            
+            # Buscar placeholders en el texto
+            placeholders_found = False
             for paragraph in doc.paragraphs:
-                if '<<firma>>' in paragraph.text:
-                    # Limpiar párrafo y agregar firma
-                    paragraph.clear()
-                    run = paragraph.add_run()
-                    run.add_picture(signature_path, width=Inches(2))
-                    paragraph.alignment = WD_ALIGN_PARAGRAPH.LEFT
-                    placeholder_found = True
-                
-                if '<<nombre>>' in paragraph.text:
+                if any(marker in paragraph.text.lower() for marker in ['<<firma>>', '<<nombre>>', '<<dni>>', '<<nombre_completo>>']):
+                    placeholders_found = True
+                    # Reemplazar marcadores
                     paragraph.text = paragraph.text.replace('<<nombre>>', person_data['nombre_completo'])
-                    placeholder_found = True
-                
-                if '<<dni>>' in paragraph.text:
-                    paragraph.text = paragraph.text.replace('<<dni>>', str(person_data['dni']))
-                    placeholder_found = True
+                    paragraph.text = paragraph.text.replace('<<nombre_completo>>', person_data['nombre_completo'])
+                    paragraph.text = paragraph.text.replace('<<dni>>', person_data['dni'])
+                    paragraph.text = paragraph.text.replace('<<firma>>', '')
             
-            # Si no se encontraron placeholders, agregar al final
-            if not placeholder_found:
-                # Agregar línea en blanco
+            # Si no hay placeholders, agregar al final
+            if not placeholders_found:
                 doc.add_paragraph()
-                
-                # Agregar firma
-                paragraph = doc.add_paragraph()
-                run = paragraph.add_run()
-                run.add_picture(signature_path, width=Inches(2))
-                
-                # Agregar nombre y DNI
-                doc.add_paragraph(f"Nombre: {person_data['nombre_completo']}")
+                doc.add_paragraph(f"Firmado por: {person_data['nombre_completo']}")
                 doc.add_paragraph(f"DNI: {person_data['dni']}")
+                doc.add_paragraph("Fecha: " + datetime.now().strftime("%d/%m/%Y"))
             
             # Guardar documento
             doc.save(output_path)
-            
-            # Limpiar archivo temporal
-            if signature_path.startswith("temp_signature_"):
-                try:
-                    os.remove(signature_path)
-                except:
-                    pass
-            
-            self.logger.info(f"DOCX firmado exitosamente: {output_path}")
             return True
             
         except Exception as e:
-            self.logger.error(f"Error firmando DOCX {docx_path}: {e}")
+            logging.error(f"Error procesando DOCX {doc_path}: {e}")
             return False
     
-    def process_documents(self, document_paths: List[str], output_folder: str, 
-                         progress_callback=None) -> Dict:
-        """Procesa múltiples documentos con todas las firmas."""
-        if self.excel_data is None:
-            return {'success': False, 'message': 'No hay datos Excel cargados'}
+    def process_document(self, doc_path, person_data, output_dir):
+        """Procesa un documento según su formato"""
+        doc_path = Path(doc_path)
+        person_dni = person_data['dni'].replace(' ', '')
         
-        results = {
-            'success': True,
-            'processed': 0,
-            'failed': 0,
-            'details': [],
-            'log_file': None
-        }
+        # Generar nombre de salida
+        output_name = f"{doc_path.stem}_{person_dni}_firmado{doc_path.suffix}"
+        output_path = Path(output_dir) / output_name
         
-        # Crear carpeta de salida
-        os.makedirs(output_folder, exist_ok=True)
+        # Procesar según extensión
+        if doc_path.suffix.lower() == '.pdf':
+            success = self.process_pdf_document(doc_path, person_data, output_path)
+        elif doc_path.suffix.lower() == '.docx':
+            success = self.process_docx_document(doc_path, person_data, output_path)
+        else:
+            logging.warning(f"Formato no soportado: {doc_path.suffix}")
+            return None
         
-        total_operations = len(document_paths) * len(self.excel_data)
-        current_operation = 0
-        
-        # Procesar cada documento con cada persona
-        for doc_path in document_paths:
-            if not os.path.exists(doc_path):
-                continue
-                
-            doc_name = Path(doc_path).stem
-            doc_ext = Path(doc_path).suffix.lower()
-            
-            for idx, person in self.excel_data.iterrows():
-                current_operation += 1
-                
-                # Actualizar progreso
-                if progress_callback:
-                    progress = (current_operation / total_operations) * 100
-                    progress_callback(progress, f"Procesando {doc_name} - {person['nombre_completo']}")
-                
-                # Generar nombre de archivo de salida
-                safe_name = re.sub(r'[^\w\-_.]', '_', person['nombre_completo'])
-                output_filename = f"{doc_name}_{safe_name}{doc_ext}"
-                output_path = os.path.join(output_folder, output_filename)
-                
-                # Procesar según tipo de archivo
-                success = False
-                if doc_ext == '.pdf':
-                    success = self.sign_pdf(doc_path, person, output_path)
-                elif doc_ext == '.docx':
-                    success = self.sign_docx(doc_path, person, output_path)
-                else:
-                    self.logger.warning(f"Formato no soportado: {doc_ext}")
-                    continue
-                
-                if success:
-                    results['processed'] += 1
-                    results['details'].append({
-                        'documento': doc_name,
-                        'persona': person['nombre_completo'],
-                        'dni': person['dni'],
-                        'archivo_salida': output_filename,
-                        'estado': 'Éxito',
-                        'timestamp': datetime.now().isoformat()
-                    })
-                else:
-                    results['failed'] += 1
-                    results['details'].append({
-                        'documento': doc_name,
-                        'persona': person['nombre_completo'],
-                        'dni': person['dni'],
-                        'archivo_salida': output_filename,
-                        'estado': 'Error',
-                        'timestamp': datetime.now().isoformat()
-                    })
-        
-        # Generar reporte Excel
-        if results['details']:
-            report_path = os.path.join(output_folder, f"reporte_firmas_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx")
-            df_report = pd.DataFrame(results['details'])
-            df_report.to_excel(report_path, index=False)
-            results['log_file'] = report_path
-        
-        results['message'] = f"Procesados: {results['processed']}, Fallidos: {results['failed']}"
-        return results
+        if success:
+            return output_path
+        return None
 
-
-class DocumentSignerGUI:
-    """Interfaz gráfica para el sistema de firma de documentos."""
+class SignatureApp:
+    """Aplicación principal con interfaz gráfica"""
     
     def __init__(self):
-        self.signer = DocumentSigner()
         self.root = tk.Tk()
+        self.root.title("Sistema de Inserción Automatizada de Firmas")
+        self.root.geometry("800x600")
+        
+        self.config = ConfigurationManager()
+        self.excel_processor = ExcelDataProcessor()
+        self.doc_processor = DocumentProcessor(self.config)
+        
+        self.excel_data = None
+        self.selected_documents = []
+        self.processing_log = []
+        
         self.setup_ui()
-        
+    
     def setup_ui(self):
-        """Configura la interfaz de usuario."""
-        self.root.title("Sistema de Firma Automática de Documentos v1.0")
-        self.root.geometry("800x700")
-        self.root.resizable(True, True)
-        
-        # Notebook para pestañas
+        """Configura la interfaz de usuario"""
+        # Crear notebook para pestañas
         notebook = ttk.Notebook(self.root)
-        notebook.pack(fill='both', expand=True, padx=10, pady=10)
+        notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
-        # Pestaña 1: Configuración
-        self.setup_config_tab(notebook)
+        # Pestaña 1: Datos Excel
+        excel_frame = ttk.Frame(notebook)
+        notebook.add(excel_frame, text="Datos Excel")
+        self.setup_excel_tab(excel_frame)
         
-        # Pestaña 2: Procesamiento
-        self.setup_processing_tab(notebook)
+        # Pestaña 2: Documentos
+        docs_frame = ttk.Frame(notebook)
+        notebook.add(docs_frame, text="Documentos")
+        self.setup_documents_tab(docs_frame)
         
-        # Pestaña 3: Resultados
-        self.setup_results_tab(notebook)
-    
-    def setup_config_tab(self, notebook):
-        """Configura la pestaña de configuración."""
+        # Pestaña 3: Configuración
         config_frame = ttk.Frame(notebook)
-        notebook.add(config_frame, text="📋 Configuración")
+        notebook.add(config_frame, text="Configuración")
+        self.setup_config_tab(config_frame)
         
-        # Frame para Excel
-        excel_frame = ttk.LabelFrame(config_frame, text="Archivo Excel con Datos", padding=10)
-        excel_frame.pack(fill='x', padx=10, pady=5)
-        
-        ttk.Label(excel_frame, text="Archivo Excel:").pack(anchor='w')
-        excel_path_frame = ttk.Frame(excel_frame)
-        excel_path_frame.pack(fill='x', pady=5)
-        
-        self.excel_path_var = tk.StringVar()
-        ttk.Entry(excel_path_frame, textvariable=self.excel_path_var, width=60).pack(side='left', fill='x', expand=True)
-        ttk.Button(excel_path_frame, text="📁 Buscar", command=self.browse_excel).pack(side='right', padx=(5, 0))
-        
-        # Botón validar Excel
-        ttk.Button(excel_frame, text="✓ Validar Excel", command=self.validate_excel).pack(pady=5)
-        
-        # Área de estado Excel
-        self.excel_status = tk.Text(excel_frame, height=3, wrap='word')
-        self.excel_status.pack(fill='x', pady=5)
-        
-        # Frame para documentos
-        docs_frame = ttk.LabelFrame(config_frame, text="Documentos a Firmar", padding=10)
-        docs_frame.pack(fill='both', expand=True, padx=10, pady=5)
-        
-        ttk.Label(docs_frame, text="Documentos seleccionados:").pack(anchor='w')
-        
-        docs_list_frame = ttk.Frame(docs_frame)
-        docs_list_frame.pack(fill='both', expand=True, pady=5)
-        
-        self.docs_listbox = tk.Listbox(docs_list_frame, selectmode='extended')
-        scrollbar = ttk.Scrollbar(docs_list_frame, orient='vertical', command=self.docs_listbox.yview)
-        self.docs_listbox.configure(yscrollcommand=scrollbar.set)
-        
-        self.docs_listbox.pack(side='left', fill='both', expand=True)
-        scrollbar.pack(side='right', fill='y')
-        
-        docs_buttons_frame = ttk.Frame(docs_frame)
-        docs_buttons_frame.pack(fill='x', pady=5)
-        
-        ttk.Button(docs_buttons_frame, text="➕ Agregar Documentos", command=self.browse_documents).pack(side='left', padx=(0, 5))
-        ttk.Button(docs_buttons_frame, text="➖ Eliminar Seleccionado", command=self.remove_documents).pack(side='left', padx=5)
-        ttk.Button(docs_buttons_frame, text="🗑️ Limpiar Lista", command=self.clear_documents).pack(side='left', padx=5)
-        
-        # Frame configuración de salida
-        output_frame = ttk.LabelFrame(config_frame, text="Configuración de Salida", padding=10)
-        output_frame.pack(fill='x', padx=10, pady=5)
-        
-        ttk.Label(output_frame, text="Carpeta de salida:").pack(anchor='w')
-        output_path_frame = ttk.Frame(output_frame)
-        output_path_frame.pack(fill='x', pady=5)
-        
-        self.output_path_var = tk.StringVar(value=self.signer.config['output_folder'])
-        ttk.Entry(output_path_frame, textvariable=self.output_path_var, width=60).pack(side='left', fill='x', expand=True)
-        ttk.Button(output_path_frame, text="📁 Cambiar", command=self.browse_output_folder).pack(side='right', padx=(5, 0))
-    
-    def setup_processing_tab(self, notebook):
-        """Configura la pestaña de procesamiento."""
+        # Pestaña 4: Procesamiento
         process_frame = ttk.Frame(notebook)
-        notebook.add(process_frame, text="⚡ Procesamiento")
+        notebook.add(process_frame, text="Procesamiento")
+        self.setup_processing_tab(process_frame)
+    
+    def setup_excel_tab(self, parent):
+        """Configura la pestaña de datos Excel"""
+        # Botones de carga
+        ttk.Button(parent, text="Seleccionar archivo Excel", 
+                  command=self.load_excel_file).pack(pady=5)
+        ttk.Button(parent, text="Buscar automáticamente", 
+                  command=self.auto_find_excel).pack(pady=5)
         
+        # Frame para información de datos
+        info_frame = ttk.LabelFrame(parent, text="Información de datos")
+        info_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        self.excel_info_text = tk.Text(info_frame, height=10)
+        scrollbar = ttk.Scrollbar(info_frame, orient=tk.VERTICAL, command=self.excel_info_text.yview)
+        self.excel_info_text.configure(yscrollcommand=scrollbar.set)
+        
+        self.excel_info_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Estado de validación
+        self.validation_label = ttk.Label(parent, text="No hay datos cargados", 
+                                        foreground="red")
+        self.validation_label.pack(pady=5)
+    
+    def setup_documents_tab(self, parent):
+        """Configura la pestaña de documentos"""
+        # Botones de selección
+        ttk.Button(parent, text="Seleccionar documentos", 
+                  command=self.select_documents).pack(pady=5)
+        ttk.Button(parent, text="Buscar automáticamente", 
+                  command=self.auto_find_documents).pack(pady=5)
+        
+        # Lista de documentos seleccionados
+        list_frame = ttk.LabelFrame(parent, text="Documentos seleccionados")
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        self.docs_listbox = tk.Listbox(list_frame)
+        docs_scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, 
+                                      command=self.docs_listbox.yview)
+        self.docs_listbox.configure(yscrollcommand=docs_scrollbar.set)
+        
+        self.docs_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        docs_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Botón para eliminar seleccionados
+        ttk.Button(parent, text="Eliminar seleccionado", 
+                  command=self.remove_selected_document).pack(pady=5)
+    
+    def setup_config_tab(self, parent):
+        """Configura la pestaña de configuración"""
+        # Ruta de salida
+        ttk.Label(parent, text="Ruta de salida:").pack(anchor=tk.W, padx=10, pady=5)
+        output_frame = ttk.Frame(parent)
+        output_frame.pack(fill=tk.X, padx=10, pady=5)
+        
+        self.output_path_var = tk.StringVar(value=self.config.get('output_path'))
+        ttk.Entry(output_frame, textvariable=self.output_path_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(output_frame, text="Seleccionar", 
+                  command=self.select_output_path).pack(side=tk.RIGHT, padx=(5, 0))
+        
+        # Configuraciones de firma
+        ttk.Label(parent, text="Tamaño de texto:").pack(anchor=tk.W, padx=10, pady=5)
+        self.text_size_var = tk.IntVar(value=self.config.get('text_size'))
+        ttk.Scale(parent, from_=8, to=24, variable=self.text_size_var, 
+                 orient=tk.HORIZONTAL).pack(fill=tk.X, padx=10)
+        
+        ttk.Label(parent, text="Opacidad de firma:").pack(anchor=tk.W, padx=10, pady=5)
+        self.opacity_var = tk.DoubleVar(value=self.config.get('signature_opacity'))
+        ttk.Scale(parent, from_=0.1, to=1.0, variable=self.opacity_var, 
+                 orient=tk.HORIZONTAL).pack(fill=tk.X, padx=10)
+        
+        # Botón guardar configuración
+        ttk.Button(parent, text="Guardar configuración", 
+                  command=self.save_configuration).pack(pady=20)
+    
+    def setup_processing_tab(self, parent):
+        """Configura la pestaña de procesamiento"""
         # Resumen
-        summary_frame = ttk.LabelFrame(process_frame, text="Resumen de Configuración", padding=10)
-        summary_frame.pack(fill='x', padx=10, pady=10)
+        summary_frame = ttk.LabelFrame(parent, text="Resumen")
+        summary_frame.pack(fill=tk.X, padx=10, pady=10)
         
-        self.summary_text = tk.Text(summary_frame, height=8, wrap='word')
-        self.summary_text.pack(fill='x')
+        self.summary_text = tk.Text(summary_frame, height=8)
+        self.summary_text.pack(fill=tk.X, padx=5, pady=5)
         
-        # Barra de progreso
-        progress_frame = ttk.LabelFrame(process_frame, text="Progreso", padding=10)
-        progress_frame.pack(fill='x', padx=10, pady=10)
+        # Botón de procesamiento
+        ttk.Button(parent, text="CONFIRMAR Y EXPORTAR", 
+                  command=self.process_documents,
+                  style='Accent.TButton').pack(pady=20)
         
-        self.progress_var = tk.DoubleVar()
-        self.progress_bar = ttk.Progressbar(progress_frame, variable=self.progress_var, maximum=100)
-        self.progress_bar.pack(fill='x', pady=5)
+        # Log de actividad
+        log_frame = ttk.LabelFrame(parent, text="Log de actividad")
+        log_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         
-        self.progress_label = ttk.Label(progress_frame, text="Listo para procesar")
-        self.progress_label.pack()
+        self.log_text = tk.Text(log_frame, height=10)
+        log_scrollbar = ttk.Scrollbar(log_frame, orient=tk.VERTICAL, command=self.log_text.yview)
+        self.log_text.configure(yscrollcommand=log_scrollbar.set)
         
-        # Botones de acción
-        action_frame = ttk.Frame(process_frame)
-        action_frame.pack(fill='x', padx=10, pady=20)
-        
-        ttk.Button(action_frame, text="🔍 Actualizar Resumen", command=self.update_summary).pack(side='left', padx=(0, 10))
-        ttk.Button(action_frame, text="🚀 PROCESAR DOCUMENTOS", command=self.process_documents, style='Accent.TButton').pack(side='left', padx=10)
-        ttk.Button(action_frame, text="⏹️ Detener", command=self.stop_processing).pack(side='left', padx=10)
-        
-        # Log en tiempo real
-        log_frame = ttk.LabelFrame(process_frame, text="Log de Procesamiento", padding=10)
-        log_frame.pack(fill='both', expand=True, padx=10, pady=10)
-        
-        self.log_text = scrolledtext.ScrolledText(log_frame, wrap='word', height=15)
-        self.log_text.pack(fill='both', expand=True)
+        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        log_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
     
-    def setup_results_tab(self, notebook):
-        """Configura la pestaña de resultados."""
-        results_frame = ttk.Frame(notebook)
-        notebook.add(results_frame, text="📊 Resultados")
-        
-        # Estadísticas
-        stats_frame = ttk.LabelFrame(results_frame, text="Estadísticas del Último Procesamiento", padding=10)
-        stats_frame.pack(fill='x', padx=10, pady=10)
-        
-        self.stats_text = tk.Text(stats_frame, height=6, wrap='word')
-        self.stats_text.pack(fill='x')
-        
-        # Acciones
-        actions_frame = ttk.Frame(results_frame)
-        actions_frame.pack(fill='x', padx=10, pady=10)
-        
-        ttk.Button(actions_frame, text="📂 Abrir Carpeta de Salida", command=self.open_output_folder).pack(side='left', padx=(0, 10))
-        ttk.Button(actions_frame, text="📄 Ver Reporte Excel", command=self.open_report).pack(side='left', padx=10)
-        
-        # Lista de archivos generados
-        files_frame = ttk.LabelFrame(results_frame, text="Archivos Generados", padding=10)
-        files_frame.pack(fill='both', expand=True, padx=10, pady=10)
-        
-        self.files_tree = ttk.Treeview(files_frame, columns=('Documento', 'Persona', 'DNI', 'Estado'), show='headings')
-        self.files_tree.heading('Documento', text='Documento')
-        self.files_tree.heading('Persona', text='Persona')
-        self.files_tree.heading('DNI', text='DNI')
-        self.files_tree.heading('Estado', text='Estado')
-        
-        files_scrollbar = ttk.Scrollbar(files_frame, orient='vertical', command=self.files_tree.yview)
-        self.files_tree.configure(yscrollcommand=files_scrollbar.set)
-        
-        self.files_tree.pack(side='left', fill='both', expand=True)
-        files_scrollbar.pack(side='right', fill='y')
-    
-    def browse_excel(self):
-        """Abre diálogo para seleccionar archivo Excel."""
-        filename = filedialog.askopenfilename(
+    def load_excel_file(self):
+        """Carga archivo Excel seleccionado manualmente"""
+        file_path = filedialog.askopenfilename(
             title="Seleccionar archivo Excel",
-            filetypes=[("Excel files", "*.xlsx *.xls"), ("All files", "*.*")]
+            filetypes=[("Archivos Excel", "*.xlsx *.xls")]
         )
-        if filename:
-            self.excel_path_var.set(filename)
+        if file_path:
+            self._process_excel_file(file_path)
     
-    def validate_excel(self):
-        """Valida el archivo Excel seleccionado."""
-        file_path = self.excel_path_var.get()
-        if not file_path:
-            messagebox.showwarning("Advertencia", "Por favor selecciona un archivo Excel.")
+    def auto_find_excel(self):
+        """Busca automáticamente archivos Excel"""
+        excel_files = self.excel_processor.find_excel_files()
+        if not excel_files:
+            messagebox.showwarning("Aviso", "No se encontraron archivos Excel en las rutas comunes")
             return
         
-        is_valid, message = self.signer.validate_excel_file(file_path)
-        
-        self.excel_status.delete(1.0, tk.END)
-        if is_valid:
-            self.excel_status.insert(tk.END, f"✅ {message}")
-            self.excel_status.configure(bg='lightgreen')
-            
-            # Cargar datos
-            if self.signer.load_excel_data(file_path):
-                self.excel_status.insert(tk.END, f"\n\nColumnas encontradas:\n{', '.join(self.signer.excel_data.columns.tolist())}")
+        if len(excel_files) == 1:
+            self._process_excel_file(excel_files[0])
         else:
-            self.excel_status.insert(tk.END, f"❌ {message}")
-            self.excel_status.configure(bg='lightcoral')
+            # Mostrar lista para selección
+            self._show_excel_selection_dialog(excel_files)
     
-    def browse_documents(self):
-        """Abre diálogo para seleccionar documentos."""
-        filenames = filedialog.askopenfilenames(
-            title="Seleccionar documentos a firmar",
+    def _process_excel_file(self, file_path):
+        """Procesa archivo Excel seleccionado"""
+        if self.excel_processor.load_excel_file(file_path):
+            self.excel_data = self.excel_processor.get_valid_data()
+            self._update_excel_info()
+            self.validation_label.config(text="✅ Datos válidos cargados", foreground="green")
+        else:
+            self._update_excel_info()
+            self.validation_label.config(text="❌ Errores en validación", foreground="red")
+    
+    def _update_excel_info(self):
+        """Actualiza la información mostrada sobre los datos Excel"""
+        self.excel_info_text.delete(1.0, tk.END)
+        
+        report = self.excel_processor.get_validation_report()
+        
+        info_text = f"Total de registros: {report['total_records']}\n"
+        info_text += f"Registros válidos: {report['valid_records']}\n\n"
+        
+        if report['errors']:
+            info_text += "ERRORES ENCONTRADOS:\n"
+            for error in report['errors']:
+                info_text += f"• {error}\n"
+            info_text += "\n"
+        
+        if report['preview']:
+            info_text += "PREVISUALIZACIÓN DE DATOS:\n"
+            for i, record in enumerate(report['preview'][:5]):
+                info_text += f"Registro {i+1}:\n"
+                for key, value in record.items():
+                    info_text += f"  {key}: {value}\n"
+                info_text += "\n"
+        
+        self.excel_info_text.insert(tk.END, info_text)
+    
+    def select_documents(self):
+        """Selecciona documentos manualmente"""
+        file_paths = filedialog.askopenfilenames(
+            title="Seleccionar documentos",
             filetypes=[
-                ("PDF files", "*.pdf"),
-                ("Word documents", "*.docx"),
-                ("RTF files", "*.rtf"),
-                ("All supported", "*.pdf *.docx *.rtf"),
-                ("All files", "*.*")
+                ("Todos los soportados", "*.pdf *.docx *.rtf"),
+                ("PDF", "*.pdf"),
+                ("Word", "*.docx"),
+                ("RTF", "*.rtf")
             ]
         )
+        if file_paths:
+            self.selected_documents.extend(file_paths)
+            self._update_documents_list()
+    
+    def auto_find_documents(self):
+        """Busca documentos automáticamente"""
+        documents = self.doc_processor.find_documents()
+        if not documents:
+            messagebox.showwarning("Aviso", "No se encontraron documentos en las rutas comunes")
+            return
         
-        for filename in filenames:
-            if filename not in self.docs_listbox.get(0, tk.END):
-                self.docs_listbox.insert(tk.END, filename)
+        self.selected_documents.extend([str(doc) for doc in documents])
+        self._update_documents_list()
     
-    def remove_documents(self):
-        """Elimina documentos seleccionados de la lista."""
-        selected = self.docs_listbox.curselection()
-        for index in reversed(selected):
-            self.docs_listbox.delete(index)
-    
-    def clear_documents(self):
-        """Limpia la lista de documentos."""
+    def _update_documents_list(self):
+        """Actualiza la lista de documentos"""
         self.docs_listbox.delete(0, tk.END)
+        for doc in self.selected_documents:
+            self.docs_listbox.insert(tk.END, os.path.basename(doc))
     
-    def browse_output_folder(self):
-        """Abre diálogo para seleccionar carpeta de salida."""
-        folder = filedialog.askdirectory(title="Seleccionar carpeta de salida")
-        if folder:
-            self.output_path_var.set(folder)
+    def remove_selected_document(self):
+        """Elimina documento seleccionado de la lista"""
+        selection = self.docs_listbox.curselection()
+        if selection:
+            index = selection[0]
+            self.selected_documents.pop(index)
+            self._update_documents_list()
     
-    def update_summary(self):
-        """Actualiza el resumen de configuración."""
-        summary = "=== RESUMEN DE CONFIGURACIÓN ===\n\n"
-        
-        # Excel
-        excel_path = self.excel_path_var.get()
-        if excel_path and self.signer.excel_data is not None:
-            summary += f"📊 Excel: {os.path.basename(excel_path)}\n"
-            summary += f"   Registros: {len(self.signer.excel_data)}\n"
-            summary += f"   Columnas: {', '.join(self.signer.excel_data.columns.tolist())}\n\n"
-        else:
-            summary += "❌ Excel: No configurado o no válido\n\n"
-        
-        # Documentos
-        docs = list(self.docs_listbox.get(0, tk.END))
-        if docs:
-            summary += f"📄 Documentos: {len(docs)} archivos seleccionados\n"
-            for doc in docs:
-                summary += f"   • {os.path.basename(doc)}\n"
-            summary += "\n"
-        else:
-            summary += "❌ Documentos: Ningún documento seleccionado\n\n"
-        
-        # Salida
-        output_path = self.output_path_var.get()
-        summary += f"📁 Carpeta de salida: {output_path}\n\n"
-        
-        # Estimación
-        if docs and self.signer.excel_data is not None:
-            total_files = len(docs) * len(self.signer.excel_data)
-            summary += f"🔢 Total de archivos a generar: {total_files}\n"
-            summary += f"💾 Espacio estimado: ~{total_files * 0.5:.1f} MB\n"
-        
-        self.summary_text.delete(1.0, tk.END)
-        self.summary_text.insert(1.0, summary)
+    def select_output_path(self):
+        """Selecciona ruta de salida"""
+        path = filedialog.askdirectory(title="Seleccionar carpeta de salida")
+        if path:
+            self.output_path_var.set(path)
     
-    def progress_callback(self, progress, message):
-        """Callback para actualizar progreso."""
-        self.progress_var.set(progress)
-        self.progress_label.config(text=message)
-        self.log_text.insert(tk.END, f"{datetime.now().strftime('%H:%M:%S')} - {message}\n")
-        self.log_text.see(tk.END)
-        self.root.update_idletasks()
-    
-    def process_documents(self):
-        """Inicia el procesamiento de documentos."""
-        # Validaciones
-        if not self.excel_path_var.get() or self.signer.excel_data is None:
-            messagebox.showerror("Error", "Por favor configura y valida el archivo Excel.")
-            return
-        
-        docs = list(self.docs_listbox.get(0, tk.END))
-        if not docs:
-            messagebox.showerror("Error", "Por favor selecciona al menos un documento.")
-            return
-        
-        output_folder = self.output_path_var.get()
-        if not output_folder:
-            messagebox.showerror("Error", "Por favor selecciona una carpeta de salida.")
-            return
-        
-        # Confirmación
-        total_files = len(docs) * len(self.signer.excel_data)
-        response = messagebox.askyesno(
-            "Confirmar Procesamiento",
-            f"Se procesarán {len(docs)} documentos con {len(self.signer.excel_data)} firmas cada uno.\n\n"
-            f"Total de archivos a generar: {total_files}\n"
-            f"Carpeta de salida: {output_folder}\n\n"
-            f"¿Desea continuar?"
-        )
-        
-        if not response:
-            return
-        
-        # Limpiar log
-        self.log_text.delete(1.0, tk.END)
-        
-        # Procesar
-        self.log_text.insert(tk.END, f"🚀 Iniciando procesamiento...\n")
-        self.log_text.insert(tk.END, f"📊 Datos: {len(self.signer.excel_data)} personas\n")
-        self.log_text.insert(tk.END, f"📄 Documentos: {len(docs)} archivos\n")
-        self.log_text.insert(tk.END, f"📁 Salida: {output_folder}\n")
-        self.log_text.insert(tk.END, "="*50 + "\n\n")
-        
-        try:
-            results = self.signer.process_documents(
-                docs, 
-                output_folder, 
-                progress_callback=self.progress_callback
-            )
-            
-            # Mostrar resultados
-            self.show_results(results)
-            
-        except Exception as e:
-            messagebox.showerror("Error", f"Error durante el procesamiento:\n{str(e)}")
-            self.signer.logger.error(f"Error en procesamiento: {e}")
-    
-    def stop_processing(self):
-        """Detiene el procesamiento (placeholder)."""
-        messagebox.showinfo("Info", "Función de detener en desarrollo.")
-    
-    def show_results(self, results):
-        """Muestra los resultados del procesamiento."""
-        # Actualizar estadísticas
-        stats_text = f"=== RESULTADOS DEL PROCESAMIENTO ===\n\n"
-        stats_text += f"✅ Documentos procesados exitosamente: {results['processed']}\n"
-        stats_text += f"❌ Documentos con errores: {results['failed']}\n"
-        stats_text += f"📊 Total procesado: {results['processed'] + results['failed']}\n"
-        stats_text += f"📁 Carpeta de salida: {self.output_path_var.get()}\n"
-        
-        if results.get('log_file'):
-            stats_text += f"📄 Reporte Excel: {os.path.basename(results['log_file'])}\n"
-        
-        stats_text += f"⏰ Completado: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}"
-        
-        self.stats_text.delete(1.0, tk.END)
-        self.stats_text.insert(1.0, stats_text)
-        
-        # Actualizar tabla de archivos
-        for item in self.files_tree.get_children():
-            self.files_tree.delete(item)
-        
-        for detail in results['details']:
-            self.files_tree.insert('', 'end', values=(
-                detail['documento'],
-                detail['persona'], 
-                detail['dni'],
-                detail['estado']
-            ))
-        
-        # Cambiar a pestaña de resultados
-        notebook = self.root.nametowidget(self.root.winfo_children()[0])
-        notebook.select(2)  # Pestaña de resultados
-        
-        # Mensaje final
-        if results['success']:
-            messagebox.showinfo(
-                "Procesamiento Completado",
-                f"Procesamiento completado exitosamente!\n\n"
-                f"Archivos generados: {results['processed']}\n"
-                f"Errores: {results['failed']}\n\n"
-                f"Los archivos se guardaron en:\n{self.output_path_var.get()}"
-            )
-        else:
-            messagebox.showwarning(
-                "Procesamiento con Errores", 
-                f"El procesamiento se completó con errores.\n\n"
-                f"Revisa el log para más detalles."
-            )
-    
-    def open_output_folder(self):
-        """Abre la carpeta de salida."""
-        output_folder = self.output_path_var.get()
-        if os.path.exists(output_folder):
-            os.startfile(output_folder)  # Windows
-        else:
-            messagebox.showwarning("Advertencia", "La carpeta de salida no existe.")
-    
-    def open_report(self):
-        """Abre el reporte Excel más reciente."""
-        output_folder = self.output_path_var.get()
-        if not os.path.exists(output_folder):
-            messagebox.showwarning("Advertencia", "La carpeta de salida no existe.")
-            return
-        
-        # Buscar el reporte más reciente
-        reports = [f for f in os.listdir(output_folder) if f.startswith('reporte_firmas_') and f.endswith('.xlsx')]
-        
-        if not reports:
-            messagebox.showinfo("Info", "No se encontraron reportes Excel.")
-            return
-        
-        # Abrir el más reciente
-        latest_report = max(reports, key=lambda x: os.path.getctime(os.path.join(output_folder, x)))
-        report_path = os.path.join(output_folder, latest_report)
-        
-        try:
-            os.startfile(report_path)  # Windows
-        except:
-            messagebox.showinfo("Info", f"Reporte ubicado en:\n{report_path}")
-    
-    def run(self):
-        """Ejecuta la aplicación."""
-        # Configurar estilo
-        style = ttk.Style()
-        style.theme_use('clam')
-        
-        # Estilo para botón principal
-        style.configure('Accent.TButton', foreground='white', background='#0078d4')
-        
-        # Inicializar resumen
-        self.root.after(100, self.update_summary)
-        
-        # Centrar ventana
-        self.root.update_idletasks()
-        x = (self.root.winfo_screenwidth() // 2) - (self.root.winfo_width() // 2)
-        y = (self.root.winfo_screenheight() // 2) - (self.root.winfo_height() // 2)
-        self.root.geometry(f"+{x}+{y}")
-        
-        self.root.mainloop()
-
-
-def main():
-    """Función principal."""
-    try:
-        app = DocumentSignerGUI()
-        app.run()
-    except Exception as e:
-        print(f"Error al iniciar la aplicación: {e}")
-        input("Presiona Enter para salir...")
-
-
-if __name__ == "__main__":
-    main()
-
-
-"""
-INSTRUCCIONES DE INSTALACIÓN Y USO
-=================================
-
-1. INSTALACIÓN DE DEPENDENCIAS:
-   pip install pandas openpyxl PyMuPDF python-docx pillow
-
-2. ESTRUCTURA DEL ARCHIVO EXCEL:
-   El archivo Excel debe contener las siguientes columnas:
-   - nombre (requerido)
-   - dni (requerido)
-   - apellido1 (opcional)
-   - apellido2 (opcional)  
-   - firma_imagen (opcional - ruta a imagen de firma)
-
-3. FORMATOS SOPORTADOS:
-   - PDF (.pdf)
-   - Word (.docx)
-   - RTF (.rtf) - en desarrollo
-
-4. PLACEHOLDERS EN DOCUMENTOS:
-   Coloca estos marcadores en tus documentos donde quieras insertar datos:
-   - <<firma>> - Para insertar la imagen de firma
-   - <<nombre>> - Para insertar el nombre completo
-   - <<dni>> - Para insertar el DNI
-
-5. USO:
-   a) Ejecuta el script: python document_signer.py
-   b) En la pestaña "Configuración":
-      - Selecciona y valida tu archivo Excel
-      - Agrega los documentos a firmar
-      - Configura la carpeta de salida
-   c) En la pestaña "Procesamiento":
-      - Revisa el resumen
-      - Haz clic en "PROCESAR DOCUMENTOS"
-   d) Revisa los resultados en la pestaña "Resultados"
-
-6. CARACTERÍSTICAS PRINCIPALES:
-   ✅ Interfaz gráfica intuitiva con pestañas
-   ✅ Validación automática de datos Excel
-   ✅ Generación automática de firmas manuscritas
-   ✅ Soporte para múltiples formatos de documento
-   ✅ Procesamiento por lotes
-   ✅ Barra de progreso en tiempo real
-   ✅ Log detallado del proceso
-   ✅ Reporte Excel de resultados
-   ✅ Sistema de backup automático
-   ✅ Manejo robusto de errores
-
-7. MEJORAS IMPLEMENTADAS:
-   - Arquitectura modular separando lógica de negocio y UI
-   - Sistema de logging completo
-   - Validación exhaustiva de datos
-   - Interfaz moderna con ttk
-   - Generación automática de reportes
-   - Manejo de placeholders avanzado
-   - Sistema de progreso y cancelación
-   - Configuración persistente
-
-8. ESTRUCTURA DE ARCHIVOS GENERADOS:
-   Documentos_Firmados/
-   ├── documento1_Juan_Perez.pdf
-   ├── documento1_Maria_Garcia.pdf
-   ├── documento2_Juan_Perez.pdf
-   ├── documento2_Maria_Garcia.pdf
-   └── reporte_firmas_20250719_143022.xlsx
-
-NOTA LEGAL:
-Este software está diseñado para fines educativos, de prueba y documentación simulada.
-El usuario es responsable del uso apropiado y legal de esta herramienta.
-"""
+    def save_
