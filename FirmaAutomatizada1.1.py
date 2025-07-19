@@ -1,5 +1,93 @@
+"""
+SISTEMA DE INSERCIÓN AUTOMATIZADA DE FIRMAS - GUÍA DE INSTALACIÓN Y USO
+
+Este sistema permite insertar de forma automatizada firmas manuscritas simuladas, nombres completos y DNI/NIF
+en documentos (.pdf, .docx, .rtf) utilizando datos extraídos desde un archivo Excel.
+
+REQUISITOS DEL SISTEMA
+-------------------------------------------------------
+- Python 3.8 o superior
+- Compatible con Windows, macOS y Linux
+- Memoria RAM: mínimo 4 GB (recomendado 8 GB)
+- Espacio libre en disco: mínimo 500 MB
+
+INSTALACIÓN DEL SISTEMA
+-------------------------------------------------------
+1. Descargar o clonar este repositorio en tu equipo.
+2. (Opcional pero recomendado) Crear un entorno virtual:
+   En Windows:
+       python -m venv env
+       env\Scripts\activate
+   En Linux/macOS:
+       python3 -m venv env
+       source env/bin/activate
+
+3. Instalar las dependencias necesarias:
+       pip install -r requirements.txt
+
+EJECUCIÓN
+-------------------------------------------------------
+Para ejecutar la aplicación principal:
+       python main.py
+
+O puedes ejecutar módulos específicos según necesidad
+(ej. procesamiento de Excel, inserción en PDF, etc.).
+
+NOTAS ADICIONALES
+-------------------------------------------------------
+- Las firmas simuladas pueden estar almacenadas en una carpeta local (por ejemplo: /firmas/) o generarse automáticamente usando fuentes de tipo manuscrito.
+- Si no se especifica carpeta de salida, los documentos firmados se exportarán por defecto en:
+       - Escritorio
+       - Documentos
+       - Descargas
+(en ese orden de prioridad, si están disponibles).
+- El sistema solicitará confirmación antes de modificar y exportar documentos.
+- Toda la configuración puede personalizarse desde un archivo config.json o mediante la interfaz gráfica (si está habilitada).
+
+IMPORTANTE
+-------------------------------------------------------
+Este sistema está diseñado exclusivamente para fines educativos, técnicos, de prueba o generación de documentación simulada. 
+No debe utilizarse con documentos reales ni con fines de suplantación de identidad. Las firmas generadas no tienen validez legal.
+"""
+
+
+# Dependencias para Sistema de Inserción Automatizada de Firmas
+# Instalar con: pip install -r requirements.txt
+
+# Procesamiento de datos
+pandas>=1.5.0
+openpyxl>=3.0.0
+
+# Interfaz gráfica
+tkinter  # Incluido en Python estándar
+
+# Procesamiento de imágenes
+Pillow>=9.0.0
+
+# Procesamiento de documentos PDF
+PyPDF2>=3.0.0
+reportlab>=3.6.0
+
+# Procesamiento de documentos Word
+python-docx>=0.8.11
+
+# Logging y utilidades estándar
+pathlib  # Incluido en Python estándar
+datetime  # Incluido en Python estándar
+json     # Incluido en Python estándar
+re       # Incluido en Python estándar
+os       # Incluido en Python estándar
+sys      # Incluido en Python estándar
+io       # Incluido en Python estándar
+logging  # Incluido en Python estándar
+
+# Opcional para interfaz web (futuro)
+# flask>=2.0.0
+# flask-wtf>=1.0.0
+
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
 """
 Aplicación para Inserción Automatizada de Firmas en Documentos
 Autor: Imegami
